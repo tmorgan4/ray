@@ -80,7 +80,7 @@ def ray_deps_setup():
 
     http_archive(
         name = "io_opencensus_cpp",
-        strip_prefix = "opencensus-cpp-0.3.0",
+        strip_prefix = "opencensus-cpp-master",
         #urls = ["https://github.com/census-instrumentation/opencensus-cpp/archive/v0.3.0.zip"],
         urls = ["https://github.com/census-instrumentation/opencensus-cpp/archive/master.zip"],
     )
