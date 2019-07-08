@@ -27,6 +27,8 @@ DEFAULT_CONFIG = with_common_config({
     "train_batch_size": 4000,
     # Total SGD batch size across all devices for SGD
     "sgd_minibatch_size": 128,
+    # Whether to shuffle sequences in the batch when training (recommended)
+    "shuffle_sequences": True,
     # Number of SGD iterations in each outer loop
     "num_sgd_iter": 30,
     # Stepsize of SGD
@@ -63,17 +65,15 @@ DEFAULT_CONFIG = with_common_config({
 # yapf: enable
 
 
-def make_optimizer(local_evaluator, remote_evaluators, config):
+def choose_policy_optimizer(workers, config):
     if config["simple_optimizer"]:
         return SyncSamplesOptimizer(
-            local_evaluator,
-            remote_evaluators,
+            workers,
             num_sgd_iter=config["num_sgd_iter"],
             train_batch_size=config["train_batch_size"])
 
     return LocalMultiGPUOptimizer(
-        local_evaluator,
-        remote_evaluators,
+        workers,
         sgd_batch_size=config["sgd_minibatch_size"],
         num_sgd_iter=config["num_sgd_iter"],
         num_gpus=config["num_gpus"],
@@ -81,13 +81,14 @@ def make_optimizer(local_evaluator, remote_evaluators, config):
         num_envs_per_worker=config["num_envs_per_worker"],
         train_batch_size=config["train_batch_size"],
         standardize_fields=["advantages"],
-        straggler_mitigation=config["straggler_mitigation"])
+        straggler_mitigation=config["straggler_mitigation"],
+        shuffle_sequences=config["shuffle_sequences"])
 
 
 def update_kl(trainer, fetches):
     if "kl" in fetches:
         # single-agent
-        trainer.local_evaluator.for_policy(
+        trainer.workers.local_worker().for_policy(
             lambda pi: pi.update_kl(fetches["kl"]))
     else:
 
@@ -98,7 +99,7 @@ def update_kl(trainer, fetches):
                 logger.debug("No data for {}, not updating kl".format(pi_id))
 
         # multi-agent
-        trainer.local_evaluator.foreach_trainable_policy(update)
+        trainer.workers.local_worker().foreach_trainable_policy(update)
 
 
 def warn_about_obs_filter(trainer):
@@ -158,7 +159,7 @@ PPOTrainer = build_trainer(
     name="PPO",
     default_config=DEFAULT_CONFIG,
     default_policy=PPOTFPolicy,
-    make_policy_optimizer=make_optimizer,
+    make_policy_optimizer=choose_policy_optimizer,
     validate_config=validate_config,
     after_optimizer_step=update_kl,
     before_train_step=warn_about_obs_filter,

@@ -12,6 +12,7 @@ import ray.experimental.tf_utils
 from ray.rllib.policy.policy import Policy, LEARNER_STATS_KEY
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.models.lstm import chop_into_sequences
+from ray.rllib.models.modelv2 import ModelV2
 from ray.rllib.utils.annotations import override, DeveloperAPI
 from ray.rllib.utils.debug import log_once, summarize
 from ray.rllib.utils.schedules import ConstantSchedule, PiecewiseSchedule
@@ -139,6 +140,39 @@ class TFPolicy(Policy):
             raise ValueError(
                 "seq_lens tensor must be given if state inputs are defined")
 
+    def get_placeholder(self, name):
+        """Returns the given action or loss input placeholder by name.
+
+        If the loss has not been initialized and a loss input placeholder is
+        requested, an error is raised.
+        """
+
+        obs_inputs = {
+            SampleBatch.CUR_OBS: self._obs_input,
+            SampleBatch.PREV_ACTIONS: self._prev_action_input,
+            SampleBatch.PREV_REWARDS: self._prev_reward_input,
+        }
+        if name in obs_inputs:
+            return obs_inputs[name]
+
+        if not self.loss_initialized():
+            raise RuntimeError(
+                "You cannot call policy.get_placeholder() for non-obs inputs "
+                "before the loss has been initialized. To avoid this, use "
+                "policy.loss_initialized() to check whether this is the "
+                "case, or move the call to later (e.g., from stats_fn to "
+                "grad_stats_fn).")
+
+        return self._loss_input_dict[name]
+
+    def get_session(self):
+        """Returns a reference to the TF session for this policy."""
+        return self._sess
+
+    def loss_initialized(self):
+        """Returns whether the loss function has been initialized."""
+        return self._loss is not None
+
     def _initialize_loss(self, loss, loss_inputs):
         self._loss_inputs = loss_inputs
         self._loss_input_dict = dict(self._loss_inputs)
@@ -147,7 +181,10 @@ class TFPolicy(Policy):
 
         if self.model:
             self._loss = self.model.custom_loss(loss, self._loss_input_dict)
-            self._stats_fetches.update({"model": self.model.custom_stats()})
+            self._stats_fetches.update({
+                "model": self.model.metrics() if isinstance(
+                    self.model, ModelV2) else self.model.custom_stats()
+            })
         else:
             self._loss = loss
 
@@ -195,21 +232,21 @@ class TFPolicy(Policy):
 
     @override(Policy)
     def compute_gradients(self, postprocessed_batch):
-        assert self._loss is not None, "Loss not initialized"
+        assert self.loss_initialized()
         builder = TFRunBuilder(self._sess, "compute_gradients")
         fetches = self._build_compute_gradients(builder, postprocessed_batch)
         return builder.get(fetches)
 
     @override(Policy)
     def apply_gradients(self, gradients):
-        assert self._loss is not None, "Loss not initialized"
+        assert self.loss_initialized()
         builder = TFRunBuilder(self._sess, "apply_gradients")
         fetches = self._build_apply_gradients(builder, gradients)
         builder.get(fetches)
 
     @override(Policy)
     def learn_on_batch(self, postprocessed_batch):
-        assert self._loss is not None, "Loss not initialized"
+        assert self.loss_initialized()
         builder = TFRunBuilder(self._sess, "learn_on_batch")
         fetches = self._build_learn_on_batch(builder, postprocessed_batch)
         return builder.get(fetches)
@@ -312,6 +349,11 @@ class TFPolicy(Policy):
             self._is_training = tf.placeholder_with_default(False, ())
         return self._is_training
 
+    def _debug_vars(self):
+        if log_once("grad_vars"):
+            for _, v in self._grads_and_vars:
+                logger.info("Optimizing variable {}".format(v))
+
     def _extra_input_signature_def(self):
         """Extra input signatures to add when exporting tf model.
         Inferred from extra_compute_action_feed_dict()
@@ -399,9 +441,11 @@ class TFPolicy(Policy):
         return fetches[0], fetches[1:-1], fetches[-1]
 
     def _build_compute_gradients(self, builder, postprocessed_batch):
+        self._debug_vars()
         builder.add_feed_dict(self.extra_compute_grad_feed_dict())
         builder.add_feed_dict({self._is_training: True})
-        builder.add_feed_dict(self._get_loss_inputs_dict(postprocessed_batch))
+        builder.add_feed_dict(
+            self._get_loss_inputs_dict(postprocessed_batch, shuffle=False))
         fetches = builder.add_fetches(
             [self._grads, self._get_grad_and_stats_fetches()])
         return fetches[0], fetches[1]
@@ -417,8 +461,10 @@ class TFPolicy(Policy):
         return fetches[0]
 
     def _build_learn_on_batch(self, builder, postprocessed_batch):
+        self._debug_vars()
         builder.add_feed_dict(self.extra_compute_grad_feed_dict())
-        builder.add_feed_dict(self._get_loss_inputs_dict(postprocessed_batch))
+        builder.add_feed_dict(
+            self._get_loss_inputs_dict(postprocessed_batch, shuffle=False))
         builder.add_feed_dict({self._is_training: True})
         fetches = builder.add_fetches([
             self._apply_op,
@@ -436,7 +482,19 @@ class TFPolicy(Policy):
                                               **fetches[LEARNER_STATS_KEY])
         return fetches
 
-    def _get_loss_inputs_dict(self, batch):
+    def _get_loss_inputs_dict(self, batch, shuffle):
+        """Return a feed dict from a batch.
+
+        Arguments:
+            batch (SampleBatch): batch of data to derive inputs from
+            shuffle (bool): whether to shuffle batch sequences. Shuffle may
+                be done in-place. This only makes sense if you're further
+                applying minibatch SGD after getting the outputs.
+
+        Returns:
+            feed dict of data
+        """
+
         feed_dict = {}
         if self._batch_divisibility_req > 1:
             meets_divisibility_reqs = (
@@ -448,6 +506,8 @@ class TFPolicy(Policy):
 
         # Simple case: not RNN nor do we need to pad
         if not self._state_inputs and meets_divisibility_reqs:
+            if shuffle:
+                batch.shuffle()
             for k, ph in self._loss_inputs:
                 feed_dict[ph] = batch[k]
             return feed_dict
@@ -470,7 +530,8 @@ class TFPolicy(Policy):
             batch[SampleBatch.AGENT_INDEX], [batch[k] for k in feature_keys],
             [batch[k] for k in state_keys],
             max_seq_len,
-            dynamic_max=dynamic_max)
+            dynamic_max=dynamic_max,
+            shuffle=shuffle)
         for k, v in zip(feature_keys, feature_sequences):
             feed_dict[self._loss_input_dict[k]] = v
         for k, v in zip(state_keys, initial_states):

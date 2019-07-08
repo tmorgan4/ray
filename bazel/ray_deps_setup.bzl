@@ -67,7 +67,7 @@ def ray_deps_setup():
     new_git_repository(
         name = "plasma",
         build_file = "@//bazel:BUILD.plasma",
-        commit = "d00497b38be84fd77c40cbf77f3422f2a81c44f9",
+        commit = "aa9f08c2b927dee09f6193033f1678fb1d42114c",
         remote = "https://github.com/apache/arrow",
     )
 
@@ -80,16 +80,14 @@ def ray_deps_setup():
 
     http_archive(
         name = "io_opencensus_cpp",
-        strip_prefix = "opencensus-cpp-master",
-        #urls = ["https://github.com/census-instrumentation/opencensus-cpp/archive/v0.3.0.zip"],
-        urls = ["https://github.com/census-instrumentation/opencensus-cpp/archive/master.zip"],
+        strip_prefix = "opencensus-cpp-3aa11f20dd610cb8d2f7c62e58d1e69196aadf11",
+        urls = ["https://github.com/census-instrumentation/opencensus-cpp/archive/3aa11f20dd610cb8d2f7c62e58d1e69196aadf11.zip"],
     )
 
     # OpenCensus depends on Abseil so we have to explicitly pull it in.
     # This is how diamond dependencies are prevented.
     git_repository(
         name = "com_google_absl",
-        #commit = "88a152ae747c3c42dc9167d46c590929b048d436",
         commit = "5b65c4af5107176555b23a638e5947686410ac1f",
         remote = "https://github.com/abseil/abseil-cpp.git",
     )
@@ -102,4 +100,19 @@ def ray_deps_setup():
         # TODO(qwang): We should use the repository of `jupp0r` here when this PR
         # `https://github.com/jupp0r/prometheus-cpp/pull/225` getting merged.
         urls = ["https://github.com/jovany-wang/prometheus-cpp/archive/master.zip"],
+    )
+
+    http_archive(
+        name = "com_github_grpc_grpc",
+        urls = [
+            "https://github.com/grpc/grpc/archive/76a381869413834692b8ed305fbe923c0f9c4472.tar.gz",
+        ],
+        strip_prefix = "grpc-76a381869413834692b8ed305fbe923c0f9c4472",
+    )
+
+    http_archive(
+        name = "build_stack_rules_proto",
+        urls = ["https://github.com/stackb/rules_proto/archive/b93b544f851fdcd3fc5c3d47aee3b7ca158a8841.tar.gz"],
+        sha256 = "c62f0b442e82a6152fcd5b1c0b7c4028233a9e314078952b6b04253421d56d61",
+        strip_prefix = "rules_proto-b93b544f851fdcd3fc5c3d47aee3b7ca158a8841",
     )
