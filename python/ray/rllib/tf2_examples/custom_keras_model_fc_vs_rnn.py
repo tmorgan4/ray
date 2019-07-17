@@ -18,11 +18,32 @@ from ray.rllib.models.tf.tf_modelv2 import TFModelV2
 from ray.rllib.utils import try_import_tf
 from ray.rllib.models.model import restore_original_dimensions
 import numpy as np
-tf = try_import_tf()
+# tf = try_import_tf()
+import tensorflow as tf
+from tensorflow.python.keras.engine.base_layer import Layer
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--run", type=str, default="IMPALA")  # "SimpleQ")  # Try PG, PPO, DQN
 parser.add_argument("--stop", type=int, default=200)
+
+
+class NonMasking(Layer):
+    def __init__(self, **kwargs):
+        self.supports_masking = True
+        super(NonMasking, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        input_shape = input_shape
+
+    def compute_mask(self, input, input_mask=None):
+        # do not pass the mask to the next layers
+        return None
+
+    def call(self, x, mask=None):
+        return x
+
+    def get_output_shape_for(self, input_shape):
+        return input_shape
 
 class FcModel_A(TFModelV2):
     """ Uses standard functional model API"""
@@ -68,38 +89,40 @@ class FcModel_B(TFModelV2):
 class RnnModel(TFModelV2):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name, **kw):
         super(RnnModel, self).__init__(obs_space, action_space, num_outputs, model_config, name, **kw)
-        # self.input_layer = tf.keras.layers.Input(shape=(None, obs_space.shape[0]), name='inputLayer')
-        # lstm_cell = tf.keras.layers.LSTMCell(model_config['lstm_cell_size'])
+        self.input_layer = tf.keras.layers.Input(shape=(None, obs_space.shape[0]), name='inputLayer')
         self.dense_input_layer = tf.keras.layers.Dense(
             model_config['fcnet_hiddens'][0],
             activation=tf.nn.relu,
             kernel_initializer=normc_initializer(1.0),
-            name='denseInputLayer')
-        self.masking_layer = tf.keras.layers.Masking(mask_value=0.0)
-        self.rnn_layer = tf.keras.layers.LSTM(
+            name='denseInputLayer')(self.input_layer)
+        masking_layer = tf.keras.layers.Masking(mask_value=0.0)(self.dense_input_layer)
+        rnn_layer = tf.keras.layers.LSTM(
             model_config['lstm_cell_size'],
-            batch_input_shape=(None, None, obs_space.shape[0]),
             return_sequences=True,
             return_state=True,
-            name='rnnLayer')
-        self.dense_layer_1 = tf.keras.layers.Dense(
+            name='rnnLayer')(masking_layer)
+        # TODO reshape layer does not accept mask
+        reshape_layer = tf.reshape(rnn_layer[0], shape=(-1, model_config['lstm_cell_size']), name='rnn_out_reshape')
+        dense_layer_1 = tf.keras.layers.Dense(
             model_config['fcnet_hiddens'][0],
             activation=tf.nn.relu,
             kernel_initializer=normc_initializer(1.0),
-            name='denseLayer1')
-        self.logits_layer = tf.keras.layers.Dense(
+            name='denseLayer1')(reshape_layer)
+        state = [dense_layer_1[1], dense_layer_1[2]]
+        logits_layer = tf.keras.layers.Dense(
             self.num_outputs,
             activation=tf.keras.activations.linear,
             kernel_initializer=normc_initializer(0.01),
-            name='logitsLayer')
-        self.value_layer = tf.keras.layers.Dense(
+            name='logitsLayer')(dense_layer_1)
+        value_layer = tf.keras.layers.Dense(
             1,
             activation=None,
             kernel_initializer=normc_initializer(0.01),
-            name='valueLayer')
-        self.register_variables(tf.trainable_variables(scope=None))
-        # self.base_model = tf.keras.Model(self.inputs, layer_out)
-        # self.register_variables(self.base_model.variables)
+            name='valueLayer')(dense_layer_1)
+        # self.register_variables(tf.trainable_variables(scope=None))
+        self.base_model = tf.keras.Model(inputs=self.input_layer, outputs=[logits_layer, value_layer, state])
+        self.register_variables(self.base_model.variables)
+        self.base_model.summary()
         self.dense_before_rnn = True
 
     # Implement the core forward method
@@ -107,27 +130,10 @@ class RnnModel(TFModelV2):
         self.prev_input = input_dict
         x = input_dict['obs']
 
-        if self.dense_before_rnn is True:
-            x = self.dense_input_layer(x)
-
         if x._rank() < 3:
             x = add_time_dimension(x, seq_lens)
 
-        # mask = tf.sequence_mask(seq_lens, name='mask') if seq_lens is not None else None
-        x = self.masking_layer(x)
-        x, state_h, state_c = self.rnn_layer(x, initial_state=state)  #, mask=mask)
-        state = [state_h, state_c]
-        x = tf.reshape(x, [-1, self.rnn_layer.cell.units])
-        x = self.dense_layer_1(x)  # only pass first of output of lstm layer
-        logits = self.logits_layer(x)
-        self._value_out = self.value_layer(x)
-
-        # self.base_model = tf.keras.Model(inputs=add_time_dimension(input_dict['obs'], seq_lens), outputs=last_layer)
-        # self.base_model.summary()
-
-        # mask = tf.sequence_mask(seq_lens, self.model_config['max_seq_len'])
-        # self.lstm_layer.reset_states(states=state if state else None)
-        # model_out, states = self.base_model(inputs=inputs, states=states, seq_lens=seq_lens)
+        logits, self._value_out, state = self.base_model(x)
 
         return logits, state
 
@@ -227,13 +233,14 @@ def get_state_shape(lstm_layer_factors=(1.0,), num_states_per_layer=2):
 
 
 if __name__ == "__main__":
-    local_mode = False
+    local_mode = True
     lstm_cell_size = 128
     model_idx = 2
     ray.init(num_cpus=0 if local_mode else None,
              local_mode=local_mode,
              object_store_memory=int(2e9),
-             redis_max_memory=int(1e9))
+             redis_max_memory=int(1e9),
+             logging_level='DEBUG' if local_mode is True else 'INFO')
     args = parser.parse_args()
     args.run = "PPO" if local_mode is True else args.run  # IMPALA hangs in local mode
     if model_idx == 2:
@@ -263,6 +270,7 @@ if __name__ == "__main__":
                           "lstm_cell_size": lstm_cell_size,
                           "state_shape": state_shape,
                           "vf_share_layers": True,
+                          "max_seq_len": 1,  # test rnn statefulness
                           }
         })
 
