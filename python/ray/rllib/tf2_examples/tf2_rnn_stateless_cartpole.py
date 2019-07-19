@@ -1,11 +1,14 @@
-""" A minimal RNN model showing basic functionality and potential issues with TFModelV2 in RLLIB """
+""" A minimal RNN model showing basic functionality and potential issues with TFModelV2 in RLLIB.
+Due to the stateless nature of this CartPole environment the only way this environment can be solved is to
+look at multiple steps however we limit max_seq_len to 1 step.  If the environment is solved it proves that rnn states
+are being passed between batches properly and rnn is reinitialized with previous state to 'stitch' together sequences"""
+
 import sys
 import ray
 from ray import tune
 from ray.rllib.models.tf.tf_modelv2 import TFModelV2
 from ray.rllib.models import ModelCatalog
 from ray.rllib.models.lstm import add_time_dimension
-from ray.rllib.models.misc import normc_initializer
 import numpy as np
 import tensorflow as tf
 import math
@@ -13,8 +16,8 @@ import gym
 from gym import spaces
 from gym.utils import seeding
 
-# Critiques
-# Standardize use of seq_len and seq_lens (both are used, confusing)
+### Suggestions ###
+# Standardize use of seq_len and seq_lens (both are used, leading to confusion)
 
 # from tf.python.keras.engine.training.Model docs (slightly modified)
 '''There are two ways to instantiate a `Model`:
@@ -149,22 +152,23 @@ class MaskingLayerRNNmodel(TFModelV2):
     """
     def __init__(self, obs_space, action_space, num_outputs, model_config, name, **kw):
         super(MaskingLayerRNNmodel, self).__init__(obs_space, action_space, num_outputs, model_config, name, **kw)
+        self.initialize_lstm_with_prev_state = model_config['custom_options']['initialize_lstm_with_prev_state']
         self.input_layer = tf.keras.layers.Input(shape=(None, obs_space.shape[0]), name='inputLayer')
-        self.dense_layer_1 = tf.keras.layers.Dense(
+        dense_layer_1 = tf.keras.layers.Dense(
             model_config['fcnet_hiddens'][0],
             activation=tf.nn.relu,
             name='denseLayer1')(self.input_layer)
-        masking_layer = tf.keras.layers.Masking(mask_value=0.0)(self.dense_layer_1)
+        masking_layer = tf.keras.layers.Masking(mask_value=0.0)(dense_layer_1)
         lstm_out, state_h, state_c = tf.keras.layers.LSTM(
             model_config['lstm_cell_size'],
             return_sequences=True,
             return_state=True,
-            name='lstmLayer')(masking_layer)
+            name='lstmLayer')(inputs=masking_layer)
         # reshape_layer does not accept mask which is propogated through model if Masking() is used upstream, FAILS!
         reshape_layer = tf.keras.layers.Reshape(
             target_shape=(model_config['lstm_cell_size'],))(lstm_out)
         dense_layer_2 = tf.keras.layers.Dense(
-            model_config['fcnet_hiddens'][0],
+            model_config['fcnet_hiddens'][1],
             activation=tf.nn.relu,
             name='denseLayer2')(reshape_layer)
         logits_layer = tf.keras.layers.Dense(
@@ -235,7 +239,7 @@ class SequenceMaskRNNmodel(TFModelV2):
             target_shape=(self.model_config['lstm_cell_size'],),
             name='reshapeLayer')
         self.dense_layer_2 = tf.keras.layers.Dense(
-            units=model_config['fcnet_hiddens'][0],
+            units=model_config['fcnet_hiddens'][1],
             activation=tf.nn.relu,
             name='denseLayer2')
         self.logits_layer = tf.keras.layers.Dense(
@@ -288,10 +292,90 @@ class SequenceMaskRNNmodel(TFModelV2):
         return tf.reshape(self._value_out, [-1])
 
 
+class InputLayerRNNmodel(TFModelV2):
+    """
+    Currently this only works if max_seq_len == 1, otherwise there is state shape mismatch between lstm outputs and
+    states (that is off by the multiple of max_seq_len)
+
+    Overview:
+     - Create a unique tf.keras.layers.Input() placeholder for each tensor in [obs, state_h, state_c, seq_lens]
+
+    Known issues:
+     - state must be split into separate state_h and state_c tensors because placeholders only accept single tensors,
+       (not list of states)
+
+    Possible solutions:
+     - TODO
+    """
+    def __init__(self, obs_space, action_space, num_outputs, model_config, name, **kw):
+        super(InputLayerRNNmodel, self).__init__(obs_space, action_space, num_outputs, model_config, name, **kw)
+
+        self.initialize_lstm_with_prev_state = model_config['custom_options']['initialize_lstm_with_prev_state']
+
+        _inputs = tf.keras.layers.Input(batch_shape=(None, None, obs_space.shape[0]), name='_inputs')
+        _state_h = tf.keras.layers.Input(batch_shape=(None, model_config['lstm_cell_size']), name='_state_h')
+        _state_c = tf.keras.layers.Input(batch_shape=(None, model_config['lstm_cell_size']), name='_state_c')
+        _seq_lens = tf.keras.layers.Input(batch_shape=(None, 1), name='_seq_lens')
+        dense_layer_1 = tf.keras.layers.Dense(
+            model_config['fcnet_hiddens'][0],
+            activation=tf.nn.relu,
+            name='denseLayer1')(_inputs)
+        mask = tf.sequence_mask(_seq_lens, model_config['max_seq_len']) if model_config['max_seq_len'] > 1 else None,
+        lstm = tf.keras.layers.LSTM(
+            model_config['lstm_cell_size'],
+            return_sequences=True,
+            return_state=True,
+            name='lstmLayer')(inputs=dense_layer_1,
+                              mask=mask,
+                              initial_state=[_state_h, _state_c] if self.initialize_lstm_with_prev_state is True else None)
+        reshape_layer = tf.keras.layers.Reshape(
+            target_shape=(model_config['lstm_cell_size'],))(lstm[0])
+        dense_layer_2 = tf.keras.layers.Dense(
+            model_config['fcnet_hiddens'][1],
+            activation=tf.nn.relu,
+            name='denseLayer2')(reshape_layer)
+        logits_layer = tf.keras.layers.Dense(
+            self.num_outputs,
+            activation=tf.keras.activations.linear,
+            name='logitsLayer')(dense_layer_2)
+        value_layer = tf.keras.layers.Dense(
+            1,
+            activation=None,
+            name='valueLayer')(dense_layer_2)
+        state = [lstm[1], lstm[2]]
+        self.base_model = tf.keras.Model(inputs=[_inputs, _state_h, _state_c, _seq_lens],
+                                         outputs=[logits_layer, value_layer, state])
+        self.register_variables(self.base_model.variables)
+        self.base_model.summary()
+
+    # Implement the core forward method
+    def forward(self, input_dict, state, seq_lens):
+        x = input_dict['obs']
+
+        if x._rank() < 3:
+            x = add_time_dimension(x, seq_lens)
+
+        logits, self._value_out, state = self.base_model(inputs=[x, state[0], state[1], seq_lens])
+
+        return logits, state
+
+    def get_initial_state(self):
+        return [np.zeros(self.model_config['lstm_cell_size'], np.float32),
+                np.zeros(self.model_config['lstm_cell_size'], np.float32)]
+
+    def value_function(self):
+        return tf.reshape(self._value_out, [-1])
+
+
 if __name__ == "__main__":
     initialize_lstm_with_prev_state = True  # if True restore the state from prevous batch, otherwise inialize with zeros
-    use_masking_layer_model = False  # if True experiment fails, included for demonstration purposes only
     lstm_cell_size = 64
+
+    # uncomment one of these models, "SequenceMaskRNNmodel is the only model that works properly
+    # default_model = "MaskingLayerRNNmodel"
+    default_model = "SequenceMaskRNNmodel"
+    # default_model = "InputLayerRNNmodel"
+
     local_mode = True if getattr(sys, 'gettrace', None)() is not None else False  # run ray locally in single process if python in debug mode
     ray.init(num_cpus=0 if local_mode else None,
              local_mode=local_mode,
@@ -300,6 +384,7 @@ if __name__ == "__main__":
              logging_level='DEBUG' if local_mode is True else 'INFO')
     ModelCatalog.register_custom_model("MaskingLayerRNNmodel", MaskingLayerRNNmodel)
     ModelCatalog.register_custom_model("SequenceMaskRNNmodel", SequenceMaskRNNmodel)
+    ModelCatalog.register_custom_model("InputLayerRNNmodel", InputLayerRNNmodel)
     tune.register_env("CartPoleStateless", lambda _: CartPoleStatelessEnv())
     tune.run(
         "PPO",
@@ -307,14 +392,15 @@ if __name__ == "__main__":
               "timesteps_total": 1e6},
         config={
             "env": "CartPoleStateless",
+            "num_envs_per_worker": 4,
             "num_workers": 0 if local_mode is True else 4,
             "num_gpus": 0,
-            "num_sgd_iter": 5,
-            "vf_loss_coeff": tune.grid_search([1e-1, 1e-2, 1e-3, 1e-4]),
-            'observation_filter': tune.grid_search(['NoFilter', 'MeanStdFilter']),
+            "num_sgd_iter": 3,
+            "vf_loss_coeff": 1e-4,
+            'observation_filter': 'MeanStdFilter',
             "horizon": 200,  # CartPoleStatelessEnv does not have built in time limit
             "model": {
-                "custom_model": "MaskingLayerRNNmodel" if use_masking_layer_model is True else "SequenceMaskRNNmodel",
+                "custom_model": default_model,
                 "custom_options": {"initialize_lstm_with_prev_state": initialize_lstm_with_prev_state},
                 "fcnet_hiddens": [64, 64],
                 "lstm_cell_size": lstm_cell_size,
