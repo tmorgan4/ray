@@ -16,13 +16,15 @@ import gym
 from gym import spaces
 from gym.utils import seeding
 
-### Suggestions ###
+### misc suggestions ###
 # Standardize use of seq_len and seq_lens (both are used, leading to confusion)
 
-# from tf.python.keras.engine.training.Model docs (slightly modified)
-'''There are two ways to instantiate a `Model`:
+'''copied from tf.python.keras.engine.training.Model docs (slightly modified)
+There are two ways to instantiate a `Model`:
+#####################################################################
+  Method #1 (RLLIB custom model "MaskingLayerRNNmodel" shown below)
+#####################################################################
 
-# Method #1 (RLLIB custom model "MaskingLayerRNNmodel" shown below)
 With the "functional API", where you start from `Input`, you chain layer calls to specify 
 the model's forward pass, and finally you create your model from inputs and outputs:
 
@@ -32,7 +34,9 @@ EXAMPLE USAGE:
     outputs = tf.keras.layers.Dense(5, activation=tf.nn.softmax)(x)
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
 
-# Method #2 (RLLIB custom model "SequenceMaskRNNmodel" shown below)
+#####################################################################
+  Method #2 (RLLIB custom model "SequenceMaskRNNmodel" shown below)  
+#####################################################################
 By subclassing the `Model` class: in that case, you should define your layers in `__init__` 
 and you should implement the model's forward pass in `call`.
 
@@ -54,7 +58,10 @@ EXAMPLE USAGE:
 class CartPoleStatelessEnv(gym.Env):
     """ Partially observed variant of the CartPole gym environment.
     We delete the velocity component of the state, so that it can only be solved by a LSTM policy.
+
+    Env copied from this example with minor changes:
     https://github.com/ray-project/ray/blob/master/python/ray/rllib/examples/cartpole_lstm.py """
+
     metadata = {"render.modes": ["human", "rgb_array"], "video.frames_per_second": 60}
 
     def __init__(self):
@@ -153,17 +160,23 @@ class MaskingLayerRNNmodel(TFModelV2):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name, **kw):
         super(MaskingLayerRNNmodel, self).__init__(obs_space, action_space, num_outputs, model_config, name, **kw)
         self.initialize_lstm_with_prev_state = model_config['custom_options']['initialize_lstm_with_prev_state']
-        self.input_layer = tf.keras.layers.Input(shape=(None, obs_space.shape[0]), name='inputLayer')
+        self.input_layer = tf.keras.layers.Input(
+            shape=(None, obs_space.shape[0]),
+            name='inputLayer')
         dense_layer_1 = tf.keras.layers.Dense(
             model_config['fcnet_hiddens'][0],
             activation=tf.nn.relu,
             name='denseLayer1')(self.input_layer)
-        masking_layer = tf.keras.layers.Masking(mask_value=0.0)(dense_layer_1)
+        masking_layer = tf.keras.layers.Masking(
+            mask_value=0.0)(dense_layer_1)
         lstm_out, state_h, state_c = tf.keras.layers.LSTM(
             model_config['lstm_cell_size'],
             return_sequences=True,
             return_state=True,
-            name='lstmLayer')(inputs=masking_layer)
+            name='lstmLayer')(inputs=masking_layer,
+                              mask=None,  # mask is provided by Masking() layer instead of this arg
+                              initial_state=None)  # note that initial_states=None (not correct), how could we pass 'state' here?
+        # if we had access to batch shape, we could set stateful=True in LSTM and call reset_states() instead of passing state
         # reshape_layer does not accept mask which is propogated through model if Masking() is used upstream, FAILS!
         reshape_layer = tf.keras.layers.Reshape(
             target_shape=(model_config['lstm_cell_size'],))(lstm_out)
@@ -187,12 +200,9 @@ class MaskingLayerRNNmodel(TFModelV2):
 
     # Implement the core forward method
     def forward(self, input_dict, state, seq_lens):
-        self.prev_input = input_dict
         x = input_dict['obs']
-
         if x._rank() < 3:
             x = add_time_dimension(x, seq_lens)
-
         logits, self._value_out, state = self.base_model(x)
 
         return logits, state
@@ -211,7 +221,7 @@ class SequenceMaskRNNmodel(TFModelV2):
 
     Overview:
      - all layers are defined in __init__ but called manually in forward() giving us access to input and output tensors
-       to every layer
+       at every layer
 
      Known issues:
      - tf.trainable_variables() returns empty list because variables are not initialized yet
@@ -222,9 +232,7 @@ class SequenceMaskRNNmodel(TFModelV2):
 
     def __init__(self, obs_space, action_space, num_outputs, model_config, name, **kw):
         super(SequenceMaskRNNmodel, self).__init__(obs_space, action_space, num_outputs, model_config, name, **kw)
-
         self.initialize_lstm_with_prev_state = self.model_config['custom_options']['initialize_lstm_with_prev_state']
-
         self.dense_layer_1 = tf.keras.layers.Dense(
             units=model_config['fcnet_hiddens'][0],
             batch_input_shape=(None, None, obs_space.shape[0]),
@@ -264,6 +272,8 @@ class SequenceMaskRNNmodel(TFModelV2):
             x = add_time_dimension(x, seq_lens)
 
         # all layers are callable giving us complete control over input and output tensors at each step
+        # note that mask is not used if max_seq_len is 1 as it creates empty tensors, the env can still be solved
+        # but using a mask would surely increase algorithm performance
         x = self.dense_layer_1(x)
         x, state_h, state_c = self.lstm_layer(
             inputs=x,
@@ -272,7 +282,7 @@ class SequenceMaskRNNmodel(TFModelV2):
 
         # reshape LSTM output to remove time dim
         x = tf.reshape(x, [-1, self.model_config['lstm_cell_size']])  # this works
-        # x = self.reshape_layer(rnn_out[0])  # this does not work
+        # x = self.reshape_layer(x)  # this does not work
 
         # call remaining layers
         x = self.dense_layer_2(x)
@@ -351,10 +361,8 @@ class InputLayerRNNmodel(TFModelV2):
     # Implement the core forward method
     def forward(self, input_dict, state, seq_lens):
         x = input_dict['obs']
-
         if x._rank() < 3:
             x = add_time_dimension(x, seq_lens)
-
         logits, self._value_out, state = self.base_model(inputs=[x, state[0], state[1], seq_lens])
 
         return logits, state
