@@ -292,6 +292,8 @@ def pretty_print(result):
     result.update(config=None)  # drop config from pretty print
     out = {}
     for k, v in result.items():
+        if 'image_buf' in k:
+            v = f'too big to print, current length: {len(v)}'
         if v is not None:
             out[k] = v
 
