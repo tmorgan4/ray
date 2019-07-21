@@ -8,9 +8,10 @@ by a LSTM policy."""
 import argparse
 import math
 import gym
-from gym import spaces
+from gym import spaces, logger
 from gym.utils import seeding
 import numpy as np
+import sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--stop", type=int, default=200)
@@ -89,6 +90,10 @@ class CartPoleStatelessEnv(gym.Env):
             self.steps_beyond_done = 0
             reward = 1.0
         else:
+            if self.steps_beyond_done > 0:
+                logger.warn("You are calling 'step()' even though this environment has already returned done = True. "
+                            "You should always call 'reset()' once you receive 'done = True' -- any further steps are "
+                            "undefined behavior.")
             self.steps_beyond_done += 1
             reward = 0.0
 
@@ -164,10 +169,17 @@ if __name__ == "__main__":
 
     tune.register_env("cartpole_stateless", lambda _: CartPoleStatelessEnv())
 
-    ray.init()
+    local_mode = True if getattr(sys, 'gettrace', None)() is not None else False  # run ray locally in single process if python in debug mode
+    ray.init(num_cpus=0 if local_mode else None,
+             local_mode=local_mode,
+             object_store_memory=int(2e9),
+             redis_max_memory=int(1e9),
+             logging_level='DEBUG' if local_mode is True else 'INFO')
 
     configs = {
         "PPO": {
+            "num_workers": 0 if local_mode else 3,
+            "num_envs_per_worker": 1 if local_mode else 4,
             "num_sgd_iter": 5,
             "vf_share_layers": True,
             "vf_loss_coeff": 0.0001,
@@ -185,9 +197,16 @@ if __name__ == "__main__":
         config=dict(
             configs[args.run], **{
                 "env": "cartpole_stateless",
+                # "horizon": 200,
+                "log_level": 'DEBUG' if local_mode is True else 'INFO',
                 "model": {
                     "use_lstm": True,
                     "lstm_use_prev_action_reward": args.use_prev_action_reward,
+                    "fcnet_hiddens": [64, 64],
+                    "lstm_cell_size": 64,
+                    # "max_seq_len": 7,
                 },
             }),
     )
+
+

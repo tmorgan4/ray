@@ -97,7 +97,7 @@ author = u'The Ray Team'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
-# built documents.
+# built docs.
 #
 # The short X.Y version.
 from ray import __version__ as version
@@ -122,7 +122,7 @@ language = None
 exclude_patterns = ['_build']
 
 # The reST default role (used for this markup: `text`) to use for all
-# documents.
+# docs.
 #default_role = None
 
 # If true, '()' will be appended to :func: etc. cross-reference text.
@@ -142,7 +142,7 @@ pygments_style = 'sphinx'
 # A list of ignored prefixes for module index sorting.
 #modindex_common_prefix = []
 
-# If true, keep warnings as "system message" paragraphs in the built documents.
+# If true, keep warnings as "system message" paragraphs in the built docs.
 #keep_warnings = False
 
 # If true, `todo` and `todoList` produce output, else they produce nothing.
@@ -164,7 +164,7 @@ html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
 # Add any paths that contain custom themes here, relative to this directory.
 #html_theme_path = []
 
-# The name for this set of Sphinx documents.  If None, it defaults to
+# The name for this set of Sphinx docs.  If None, it defaults to
 # "<project> v<release> documentation".
 #html_title = None
 
@@ -275,7 +275,7 @@ latex_documents = [
 # the title page.
 #latex_logo = None
 
-# For "manual" documents, if this is true, then toplevel headings are parts,
+# For "manual" docs, if this is true, then toplevel headings are parts,
 # not chapters.
 #latex_use_parts = False
 

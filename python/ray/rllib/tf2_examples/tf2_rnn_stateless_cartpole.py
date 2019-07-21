@@ -13,7 +13,7 @@ import numpy as np
 import tensorflow as tf
 import math
 import gym
-from gym import spaces
+from gym import spaces, logger
 from gym.utils import seeding
 
 ### misc suggestions ###
@@ -24,7 +24,6 @@ There are two ways to instantiate a `Model`:
 #####################################################################
   Method #1 (RLLIB custom model "MaskingLayerRNNmodel" shown below)
 #####################################################################
-
 With the "functional API", where you start from `Input`, you chain layer calls to specify 
 the model's forward pass, and finally you create your model from inputs and outputs:
 
@@ -117,6 +116,10 @@ class CartPoleStatelessEnv(gym.Env):
             self.steps_beyond_done = 0
             reward = 1.0
         else:
+            if self.steps_beyond_done > 0:
+                logger.warn("You are calling 'step()' even though this environment has already returned done = True. "
+                            "You should always call 'reset()' once you receive 'done = True' -- any further steps are "
+                            "undefined behavior.")
             self.steps_beyond_done += 1
             reward = 0.0
 
@@ -325,21 +328,23 @@ class InputLayerRNNmodel(TFModelV2):
         _inputs = tf.keras.layers.Input(batch_shape=(None, None, obs_space.shape[0]), name='_inputs')
         _state_h = tf.keras.layers.Input(batch_shape=(None, model_config['lstm_cell_size']), name='_state_h')
         _state_c = tf.keras.layers.Input(batch_shape=(None, model_config['lstm_cell_size']), name='_state_c')
-        _seq_lens = tf.keras.layers.Input(batch_shape=(None, 1), name='_seq_lens')
+        _seq_lens = tf.keras.layers.Input(batch_shape=(None,), name='_seq_lens')
         dense_layer_1 = tf.keras.layers.Dense(
             model_config['fcnet_hiddens'][0],
             activation=tf.nn.relu,
             name='denseLayer1')(_inputs)
-        mask = tf.sequence_mask(_seq_lens, model_config['max_seq_len']) if model_config['max_seq_len'] > 1 else None,
+        mask = tf.sequence_mask(_seq_lens, model_config['max_seq_len']) if model_config['max_seq_len'] > 1 else None
         lstm = tf.keras.layers.LSTM(
             model_config['lstm_cell_size'],
             return_sequences=True,
             return_state=True,
-            name='lstmLayer')(inputs=dense_layer_1,
-                              mask=mask,
-                              initial_state=[_state_h, _state_c] if self.initialize_lstm_with_prev_state is True else None)
+            name='lstmLayer')
+        lstm_outputs, state_h, state_c = lstm(inputs=dense_layer_1,
+                                              mask=mask,
+                                              initial_state=[_state_h, _state_c] if self.initialize_lstm_with_prev_state is True else None)
+        # reshape_layer = tf.reshape(lstm[0], [-1, model_config['lstm_cell_size']])
         reshape_layer = tf.keras.layers.Reshape(
-            target_shape=(model_config['lstm_cell_size'],))(lstm[0])
+            target_shape=(model_config['lstm_cell_size'],))(lstm_outputs)
         dense_layer_2 = tf.keras.layers.Dense(
             model_config['fcnet_hiddens'][1],
             activation=tf.nn.relu,
@@ -352,9 +357,8 @@ class InputLayerRNNmodel(TFModelV2):
             1,
             activation=None,
             name='valueLayer')(dense_layer_2)
-        state = [lstm[1], lstm[2]]
-        self.base_model = tf.keras.Model(inputs=[_inputs, _state_h, _state_c, _seq_lens],
-                                         outputs=[logits_layer, value_layer, state])
+        self.base_model = tf.keras.Model(inputs=[_inputs, _seq_lens, _state_h, _state_c],
+                                         outputs=[logits_layer, value_layer, state_h, state_c])
         self.register_variables(self.base_model.variables)
         self.base_model.summary()
 
@@ -363,7 +367,7 @@ class InputLayerRNNmodel(TFModelV2):
         x = input_dict['obs']
         if x._rank() < 3:
             x = add_time_dimension(x, seq_lens)
-        logits, self._value_out, state = self.base_model(inputs=[x, state[0], state[1], seq_lens])
+        logits, self._value_out, state_h, state_c = self.base_model(inputs=[x, seq_lens, state[0], state[1]])
 
         return logits, state
 
@@ -381,8 +385,8 @@ if __name__ == "__main__":
 
     # uncomment one of these models, "SequenceMaskRNNmodel is the only model that works properly
     # default_model = "MaskingLayerRNNmodel"
-    default_model = "SequenceMaskRNNmodel"
-    # default_model = "InputLayerRNNmodel"
+    # default_model = "SequenceMaskRNNmodel"
+    default_model = "InputLayerRNNmodel"
 
     local_mode = True if getattr(sys, 'gettrace', None)() is not None else False  # run ray locally in single process if python in debug mode
     ray.init(num_cpus=0 if local_mode else None,
@@ -415,7 +419,7 @@ if __name__ == "__main__":
                 "use_lstm": False,
                 "state_shape": [lstm_cell_size, lstm_cell_size],
                 "vf_share_layers": True,
-                "max_seq_len": 1,
+                "max_seq_len": 7,
             }
         })
 
