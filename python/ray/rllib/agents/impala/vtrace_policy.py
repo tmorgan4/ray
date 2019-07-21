@@ -239,9 +239,9 @@ def add_behaviour_logits(policy):
     return {BEHAVIOUR_LOGITS: policy.model_out}
 
 
-# def validate_config(policy, obs_space, action_space, config):  # breaks evaluation worker envs - TJM
-    # assert config["batch_mode"] == "truncate_episodes", \
-    #     "Must use `truncate_episodes` batch mode with V-trace."
+def validate_config(policy, obs_space, action_space, config):  # breaks evaluation worker envs
+    assert config["batch_mode"] == "truncate_episodes", \
+        "Must use `truncate_episodes` batch mode with V-trace."
 
 
 def choose_optimizer(policy, config):
@@ -295,7 +295,7 @@ VTraceTFPolicy = build_tf_policy(
     optimizer_fn=choose_optimizer,
     gradients_fn=clip_gradients,
     extra_action_fetches_fn=add_behaviour_logits,
-    before_init=validate_config,
+    before_init=None,  # validate_config, # breaks evaluation workers
     before_loss_init=setup_mixins,
     mixins=[LearningRateSchedule, EntropyCoeffSchedule, ValueNetworkMixin],
     get_batch_divisibility_req=lambda p: p.config["sample_batch_size"])
