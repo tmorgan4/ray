@@ -322,26 +322,24 @@ class InputLayerRNNmodel(TFModelV2):
     """
     def __init__(self, obs_space, action_space, num_outputs, model_config, name, **kw):
         super(InputLayerRNNmodel, self).__init__(obs_space, action_space, num_outputs, model_config, name, **kw)
-
         self.initialize_lstm_with_prev_state = model_config['custom_options']['initialize_lstm_with_prev_state']
-
-        _inputs = tf.keras.layers.Input(batch_shape=(None, None, obs_space.shape[0]), name='_inputs')
-        _state_h = tf.keras.layers.Input(batch_shape=(None, model_config['lstm_cell_size']), name='_state_h')
-        _state_c = tf.keras.layers.Input(batch_shape=(None, model_config['lstm_cell_size']), name='_state_c')
-        _seq_lens = tf.keras.layers.Input(batch_shape=(None,), name='_seq_lens')
+        inputs = tf.keras.layers.Input(batch_shape=(None, None, obs_space.shape[0]), name='inputs')
+        seq_lens = tf.keras.layers.Input(batch_shape=(None,), name='seq_lens')
+        state_h_in = tf.keras.layers.Input(batch_shape=(None, model_config['lstm_cell_size']), name='state_h_in')
+        state_c_in = tf.keras.layers.Input(batch_shape=(None, model_config['lstm_cell_size']), name='state_c_in')
         dense_layer_1 = tf.keras.layers.Dense(
             model_config['fcnet_hiddens'][0],
             activation=tf.nn.relu,
-            name='denseLayer1')(_inputs)
-        mask = tf.sequence_mask(_seq_lens, model_config['max_seq_len']) if model_config['max_seq_len'] > 1 else None
+            name='denseLayer1')(inputs)
+        mask = tf.sequence_mask(seq_lens, model_config['max_seq_len']) if model_config['max_seq_len'] > 1 else None
         lstm = tf.keras.layers.LSTM(
             model_config['lstm_cell_size'],
             return_sequences=True,
             return_state=True,
             name='lstmLayer')
-        lstm_outputs, state_h, state_c = lstm(inputs=dense_layer_1,
+        lstm_outputs, state_h_out, state_c_out = lstm(inputs=dense_layer_1,
                                               mask=mask,
-                                              initial_state=[_state_h, _state_c] if self.initialize_lstm_with_prev_state is True else None)
+                                              initial_state=[state_h_in, state_c_in] if self.initialize_lstm_with_prev_state is True else None)
         # reshape_layer = tf.reshape(lstm[0], [-1, model_config['lstm_cell_size']])
         reshape_layer = tf.keras.layers.Reshape(
             target_shape=(model_config['lstm_cell_size'],))(lstm_outputs)
@@ -357,10 +355,13 @@ class InputLayerRNNmodel(TFModelV2):
             1,
             activation=None,
             name='valueLayer')(dense_layer_2)
-        self.base_model = tf.keras.Model(inputs=[_inputs, _seq_lens, _state_h, _state_c],
-                                         outputs=[logits_layer, value_layer, state_h, state_c])
+        self.base_model = tf.keras.Model(inputs=[inputs, seq_lens, state_h_in, state_c_in],
+                                         outputs=[logits_layer, value_layer, state_h_out, state_c_out])
         self.register_variables(self.base_model.variables)
         self.base_model.summary()
+        # json = self.base_model.to_json()
+        # self.base_model.compile(loss='sparse_categorical_crossentropy', optimizer=tf.keras.optimizers.RMSprop())
+        # self.base_model.save('InputLayerRNNmodel.h5')  # https://github.com/tensorflow/tensorflow/issues/27543
 
     # Implement the core forward method
     def forward(self, input_dict, state, seq_lens):
@@ -379,6 +380,79 @@ class InputLayerRNNmodel(TFModelV2):
         return tf.reshape(self._value_out, [-1])
 
 
+class InputLayerRNNmodel_v2(TFModelV2):
+    """
+    Alternate version of InputLayerRNNmodel with changes made by Eric L.
+    """
+
+    def __init__(self, obs_space, action_space, num_outputs, model_config, name, **kw):
+        super(InputLayerRNNmodel_v2, self).__init__(obs_space, action_space, num_outputs, model_config, name, **kw)
+        self.initialize_lstm_with_prev_state = model_config['custom_options']['initialize_lstm_with_prev_state']
+        self.input_layer = tf.keras.layers.Input(
+            shape=(None, obs_space.shape[0]),
+            name='inputLayer')
+        self.state_in_c = tf.keras.layers.Input(
+            shape=(model_config['lstm_cell_size']),
+            name='c')
+        self.state_in_h = tf.keras.layers.Input(
+            shape=(model_config['lstm_cell_size']),
+            name='h')
+        self.seq_in = tf.keras.layers.Input(
+            shape=(),
+            name='seqLens')
+        dense_layer_1 = tf.keras.layers.Dense(
+            model_config['fcnet_hiddens'][0],
+            activation=tf.nn.relu,
+            name='denseLayer1')(self.input_layer)
+#        masking_layer = tf.keras.layers.Masking(
+#            mask_value=0.0)(dense_layer_1)
+        lstm_out, state_h, state_c = tf.keras.layers.LSTM(
+            model_config['lstm_cell_size'],
+            return_sequences=True,
+            return_state=True,
+            name='lstmLayer')(inputs=dense_layer_1,
+                              mask=tf.sequence_mask(self.seq_in) if self.model_config['max_seq_len'] > 1 else None,
+                              initial_state=[self.state_in_c, self.state_in_h])
+        reshape_layer = tf.keras.layers.Lambda(lambda x: tf.reshape(x, [-1, model_config['lstm_cell_size']]))(lstm_out)
+        dense_layer_2 = tf.keras.layers.Dense(
+            model_config['fcnet_hiddens'][1],
+            activation=tf.nn.relu,
+            name='denseLayer2')(lstm_out)
+        logits_layer = tf.keras.layers.Dense(
+            self.num_outputs,
+            activation=tf.keras.activations.linear,
+            name='logitsLayer')(dense_layer_2)
+        value_layer = tf.keras.layers.Dense(
+            1,
+            activation=None,
+            name='valueLayer')(dense_layer_2)
+        state = [state_h, state_c]
+
+        self.base_model = tf.keras.Model(inputs=[self.input_layer, self.state_in_c, self.state_in_h, self.seq_in],
+                                         outputs=[logits_layer, value_layer, state_h, state_c])
+        self.register_variables(self.base_model.variables)
+        self.base_model.summary()
+        # json = self.base_model.to_json()
+        # self.base_model.compile(loss='sparse_categorical_crossentropy', optimizer=tf.keras.optimizers.RMSprop())
+        # self.base_model.save('InputLayerRNNmodel_v2.h5')  # https://github.com/tensorflow/tensorflow/issues/27543
+
+    # Implement the core forward method
+    def forward(self, input_dict, state, seq_lens):
+        x = input_dict['obs']
+        if x._rank() < 3:
+            x = add_time_dimension(x, seq_lens)
+        logits, self._value_out, h, c = self.base_model((x, state[0], state[1], seq_lens))
+
+        return tf.reshape(logits, [-1, 2]), [h, c]
+
+    def get_initial_state(self):
+        return [np.zeros(self.model_config['lstm_cell_size'], np.float32),
+                np.zeros(self.model_config['lstm_cell_size'], np.float32)]
+
+    def value_function(self):
+        return tf.reshape(self._value_out, [-1])
+
+
 if __name__ == "__main__":
     initialize_lstm_with_prev_state = True  # if True restore the state from prevous batch, otherwise inialize with zeros
     lstm_cell_size = 64
@@ -386,7 +460,8 @@ if __name__ == "__main__":
     # uncomment one of these models, "SequenceMaskRNNmodel is the only model that works properly
     # default_model = "MaskingLayerRNNmodel"
     # default_model = "SequenceMaskRNNmodel"
-    default_model = "InputLayerRNNmodel"
+    # default_model = "InputLayerRNNmodel"
+    default_model = "InputLayerRNNmodel_v2"
 
     local_mode = True if getattr(sys, 'gettrace', None)() is not None else False  # run ray locally in single process if python in debug mode
     ray.init(num_cpus=0 if local_mode else None,
@@ -397,6 +472,7 @@ if __name__ == "__main__":
     ModelCatalog.register_custom_model("MaskingLayerRNNmodel", MaskingLayerRNNmodel)
     ModelCatalog.register_custom_model("SequenceMaskRNNmodel", SequenceMaskRNNmodel)
     ModelCatalog.register_custom_model("InputLayerRNNmodel", InputLayerRNNmodel)
+    ModelCatalog.register_custom_model("InputLayerRNNmodel_v2", InputLayerRNNmodel_v2)
     tune.register_env("CartPoleStateless", lambda _: CartPoleStatelessEnv())
     tune.run(
         "PPO",

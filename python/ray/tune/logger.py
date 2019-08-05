@@ -293,8 +293,8 @@ def pretty_print(result):
     out = {}
     for k, v in result.items():
         if 'image_buf' in k:
-            v = f'too big to print, current length: {len(v)}'
-        if v is not None:
+            out[k] = 'too big to print, current length: {}'.format(len(v))
+        elif v is not None:
             out[k] = v
 
     cleaned = json.dumps(out, cls=_SafeFallbackEncoder)
