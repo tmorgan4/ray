@@ -12,7 +12,7 @@ import gym
 
 import ray
 from ray.rllib.agents.impala import vtrace
-from ray.rllib.models.action_dist import Categorical
+from ray.rllib.models.tf.tf_action_dist import Categorical
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.policy.tf_policy_template import build_tf_policy
 from ray.rllib.policy.tf_policy import LearningRateSchedule, \
@@ -184,7 +184,8 @@ def build_vtrace_loss(policy, batch_tensors):
         actions=make_time_major(loss_actions, drop_last=True),
         actions_logp=make_time_major(
             action_dist.logp(actions), drop_last=True),
-        actions_entropy=make_time_major(action_dist.entropy(), drop_last=True),
+        actions_entropy=make_time_major(
+            action_dist.multi_entropy(), drop_last=True),
         dones=make_time_major(dones, drop_last=True),
         behaviour_logits=make_time_major(
             unpacked_behaviour_logits, drop_last=True),
@@ -239,9 +240,10 @@ def add_behaviour_logits(policy):
     return {BEHAVIOUR_LOGITS: policy.model_out}
 
 
-def validate_config(policy, obs_space, action_space, config):  # breaks evaluation worker envs
-    assert config["batch_mode"] == "truncate_episodes", \
-        "Must use `truncate_episodes` batch mode with V-trace."
+def validate_config(policy, obs_space, action_space, config):
+    if config["vtrace"]:
+        assert config["batch_mode"] == "truncate_episodes", \
+            "Must use `truncate_episodes` batch mode with V-trace."
 
 
 def choose_optimizer(policy, config):
@@ -295,7 +297,7 @@ VTraceTFPolicy = build_tf_policy(
     optimizer_fn=choose_optimizer,
     gradients_fn=clip_gradients,
     extra_action_fetches_fn=add_behaviour_logits,
-    before_init=None,  # validate_config, # breaks evaluation workers
+    before_init=validate_config,
     before_loss_init=setup_mixins,
     mixins=[LearningRateSchedule, EntropyCoeffSchedule, ValueNetworkMixin],
     get_batch_divisibility_req=lambda p: p.config["sample_batch_size"])

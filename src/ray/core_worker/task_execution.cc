@@ -1,6 +1,7 @@
 #include "ray/core_worker/task_execution.h"
 #include "ray/core_worker/context.h"
 #include "ray/core_worker/core_worker.h"
+#include "ray/core_worker/transport/direct_actor_transport.h"
 #include "ray/core_worker/transport/raylet_transport.h"
 
 namespace ray {
@@ -16,17 +17,24 @@ CoreWorkerTaskExecutionInterface::CoreWorkerTaskExecutionInterface(
   RAY_CHECK(execution_callback_ != nullptr);
 
   auto func = std::bind(&CoreWorkerTaskExecutionInterface::ExecuteTask, this,
-                        std::placeholders::_1);
+                        std::placeholders::_1, std::placeholders::_2);
   task_receivers_.emplace(
-      static_cast<int>(TaskTransportType::RAYLET),
+      TaskTransportType::RAYLET,
       std::unique_ptr<CoreWorkerRayletTaskReceiver>(new CoreWorkerRayletTaskReceiver(
-          raylet_client, main_service_, worker_server_, func)));
+          raylet_client, object_interface_, main_service_, worker_server_, func)));
+  task_receivers_.emplace(
+      TaskTransportType::DIRECT_ACTOR,
+      std::unique_ptr<CoreWorkerDirectActorTaskReceiver>(
+          new CoreWorkerDirectActorTaskReceiver(object_interface_, main_service_,
+                                                worker_server_, func)));
 
   // Start RPC server after all the task receivers are properly initialized.
   worker_server_.Run();
 }
 
-Status CoreWorkerTaskExecutionInterface::ExecuteTask(const TaskSpecification &task_spec) {
+Status CoreWorkerTaskExecutionInterface::ExecuteTask(
+    const TaskSpecification &task_spec,
+    std::vector<std::shared_ptr<RayObject>> *results) {
   worker_context_.SetCurrentTask(task_spec);
 
   RayFunction func{task_spec.GetLanguage(), task_spec.FunctionDescriptor()};
@@ -52,7 +60,7 @@ Status CoreWorkerTaskExecutionInterface::ExecuteTask(const TaskSpecification &ta
     num_returns--;
   }
 
-  auto status = execution_callback_(func, args, task_info, num_returns);
+  auto status = execution_callback_(func, args, task_info, num_returns, results);
   // TODO(zhijunfu):
   // 1. Check and handle failure.
   // 2. Save or load checkpoint.

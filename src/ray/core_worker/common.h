@@ -6,7 +6,8 @@
 #include "ray/common/buffer.h"
 #include "ray/common/id.h"
 #include "ray/common/task/task_spec.h"
-#include "ray/raylet/raylet_client.h"
+#include "ray/rpc/raylet/raylet_client.h"
+#include "ray/util/util.h"
 
 namespace ray {
 using WorkerType = rpc::WorkerType;
@@ -73,9 +74,9 @@ struct TaskInfo {
   const TaskType task_type;
 };
 
-enum class StoreProviderType { PLASMA };
+enum class StoreProviderType { LOCAL_PLASMA, PLASMA, MEMORY };
 
-enum class TaskTransportType { RAYLET };
+enum class TaskTransportType { RAYLET, DIRECT_ACTOR };
 
 }  // namespace ray
 

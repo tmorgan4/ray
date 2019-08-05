@@ -2,6 +2,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import random
+import numpy as np
 import gym
 import logging
 import pickle
@@ -130,6 +132,8 @@ class RolloutWorker(EvaluatorInterface):
                  remote_worker_envs=False,
                  remote_env_batch_wait_ms=0,
                  soft_horizon=False,
+                 no_done_at_end=False,
+                 seed=None,
                  _fake_sampler=False):
         """Initialize a rollout worker.
 
@@ -215,6 +219,10 @@ class RolloutWorker(EvaluatorInterface):
                 step / reset and model inference perf.
             soft_horizon (bool): Calculate rewards but don't reset the
                 environment when the horizon is hit.
+            no_done_at_end (bool): Ignore the done=True at the end of the
+                episode and instead record done=False.
+            seed (int): Set the seed of both np and tf to this value to
+                to ensure each remote worker has unique exploration behavior.
             _fake_sampler (bool): Use a fake (inf speed) sampler for testing.
         """
 
@@ -272,13 +280,13 @@ class RolloutWorker(EvaluatorInterface):
                     dim=model_config.get("dim"),
                     framestack=model_config.get("framestack"))
                 if monitor_path:
-                    env = _monitor(env, monitor_path)
+                    env = gym.wrappers.Monitor(env, monitor_path, resume=True)
                 return env
         else:
 
             def wrap(env):
                 if monitor_path:
-                    env = _monitor(env, monitor_path)
+                    env = gym.wrappers.Monitor(env, monitor_path, resume=True)
                 return env
 
         self.env = wrap(self.env)
@@ -292,13 +300,26 @@ class RolloutWorker(EvaluatorInterface):
         self.tf_sess = None
         policy_dict = _validate_and_canonicalize(policy, self.env)
         self.policies_to_train = policies_to_train or list(policy_dict.keys())
+        # set numpy and python seed
+        if seed is not None:
+            np.random.seed(seed)
+            random.seed(seed)
+            if not hasattr(self.env, "seed"):
+                raise ValueError("Env doesn't support env.seed(): {}".format(
+                    self.env))
+            self.env.seed(seed)
+            try:
+                import torch
+                torch.manual_seed(seed)
+            except ImportError:
+                logger.info("Could not seed torch")
         if _has_tensorflow_graph(policy_dict):
             if (ray.is_initialized()
                     and ray.worker._mode() != ray.worker.LOCAL_MODE
                     and not ray.get_gpu_ids()):
-                logger.info("Creating policy evaluation worker {}".format(
+                logger.debug("Creating policy evaluation worker {}".format(
                     worker_index) +
-                            " on CPU (please ignore any CUDA init errors)")
+                             " on CPU (please ignore any CUDA init errors)")
             if not tf:
                 raise ImportError("Could not import tensorflow")
             with tf.Graph().as_default():
@@ -309,6 +330,9 @@ class RolloutWorker(EvaluatorInterface):
                         config=tf.ConfigProto(
                             gpu_options=tf.GPUOptions(allow_growth=True)))
                 with self.tf_sess.as_default():
+                    # set graph-level seed
+                    if seed is not None:
+                        tf.set_random_seed(seed)
                     self.policy_map, self.preprocessors = \
                         self._build_policy_map(policy_dict, policy_config)
         else:
@@ -387,7 +411,8 @@ class RolloutWorker(EvaluatorInterface):
                 tf_sess=self.tf_sess,
                 clip_actions=clip_actions,
                 blackhole_outputs="simulation" in input_evaluation,
-                soft_horizon=soft_horizon)
+                soft_horizon=soft_horizon,
+                no_done_at_end=no_done_at_end)
             self.sampler.start()
         else:
             self.sampler = SyncSampler(
@@ -403,7 +428,8 @@ class RolloutWorker(EvaluatorInterface):
                 pack=pack_episodes,
                 tf_sess=self.tf_sess,
                 clip_actions=clip_actions,
-                soft_horizon=soft_horizon)
+                soft_horizon=soft_horizon,
+                no_done_at_end=no_done_at_end)
 
         self.input_reader = input_creator(self.io_context)
         assert isinstance(self.input_reader, InputReader), self.input_reader
@@ -784,10 +810,6 @@ def _validate_env(env):
             "ExternalEnv, VectorEnv, or BaseEnv. The provided env creator "
             "function returned {} ({}).".format(env, type(env)))
     return env
-
-
-def _monitor(env, path):
-    return gym.wrappers.Monitor(env, path, resume=True)
 
 
 def _has_tensorflow_graph(policy_dict):
