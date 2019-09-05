@@ -108,8 +108,8 @@ class CartPoleStatelessEnv(gym.Env):
         self.x_threshold = 2.4
 
         high = np.array([self.x_threshold * 2, self.theta_threshold_radians * 2])
-        # self.action_space = spaces.Discrete(2)
-        self.action_space = spaces.MultiDiscrete([2])
+        self.action_space = spaces.Discrete(2)
+        # self.action_space = spaces.MultiDiscrete([2,])  # TODO issue with using multidiscrete in rllib
         self.observation_space = spaces.Dict({'cart_position': spaces.Box(-high[0], high[0], dtype=np.float32),
                                               'pole_angle': spaces.Box(-high[1], high[1], dtype=np.float32)})
         self.seed()
@@ -123,6 +123,7 @@ class CartPoleStatelessEnv(gym.Env):
 
     def step(self, action):
         assert self.action_space.contains(action), "%r (%s) invalid" % (action, type(action))
+        action = action[0]  # TODO: experimenting with action spaces
         state = self.state
         x, x_dot, theta, theta_dot = state
         force = self.force_mag if action == 1 else -self.force_mag
